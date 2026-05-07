@@ -59,8 +59,11 @@ Rules:
    (e.g., cudaMalloc -> hipMalloc, cudaMemcpy -> hipMemcpy).
 3. Preserve kernel logic exactly. The numerical output of the ported code
    must match the original.
-4. Keep the code well-formatted and readable.
-5. After producing a port, you MUST call the `compile_port` tool to verify
+4. For kernel launches, either CUDA-style `kernel<<<grid, block>>>(...)` or
+   HIP-native `hipLaunchKernelGGL(kernel, grid, block, 0, 0, ...)` is acceptable.
+   Both are valid HIP.
+5. Keep the code well-formatted and readable.
+6. After producing a port, you MUST call the `compile_port` tool to verify
    it compiles. If it fails, read the errors carefully and produce a corrected
    version.
 
@@ -98,6 +101,21 @@ def compile_port(hip_source: str) -> dict:
         "warnings": result.warnings,
     }
 
+def _strip_markdown_fences(text: str) -> str:
+    """Strip markdown code fences if the LLM wrapped its output in them.
+
+    LLMs often return code wrapped in ```language ... ``` despite system
+    prompt instructions otherwise. We unwrap before returning.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        # Remove the opening fence (with or without language identifier)
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1:]
+    if text.endswith("```"):
+        text = text[:-3].rstrip()
+    return text.strip()
 
 # ---------- Public entry point ----------
 
@@ -132,7 +150,7 @@ def port_cuda_to_hip(cuda_source: str, max_iterations: int = 5) -> str:
         model_settings={"max_tokens": 4096},
     )
 
-    return result.output.strip()
+    return _strip_markdown_fences(result.output.strip())
 
 
 # ---------- CLI for quick testing ----------

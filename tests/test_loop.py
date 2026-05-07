@@ -1,9 +1,8 @@
 """
-End-to-end integration test for the Rocmigrate agent.
+End-to-end integration tests for the Rocmigrate agent.
 
-Verifies that the agent can take CUDA source, produce HIP source,
-and that the HIP source passes mock compilation. Run this anytime
-you want to confirm the loop still works.
+Tests the full porting loop on three kernels of increasing complexity:
+saxpy (1D, simple), vector_dot (1D, reduction), matmul (2D, multi-array).
 
 Usage:
     python tests/test_loop.py
@@ -19,57 +18,83 @@ from agent.main import port_cuda_to_hip
 from mcp_servers.hipcc.server import compile_hip
 
 
-def test_saxpy_port():
-    """Agent should successfully port saxpy.cu to compiling HIP."""
-    cuda_path = ROOT / "kernels" / "cuda" / "saxpy.cu"
+# CUDA-only symbols that should never appear in the agent's output
+CUDA_LEFTOVERS = [
+    "cudaMalloc", "cudaFree", "cudaMemcpy",
+    "cudaMemcpyHostToDevice", "cudaMemcpyDeviceToHost",
+    "cuda_runtime.h", "cudaDeviceSynchronize",
+]
+
+
+def _check_port(kernel_name: str) -> str:
+    """Run the agent on a kernel and assert the output is valid HIP."""
+    cuda_path = ROOT / "kernels" / "cuda" / f"{kernel_name}.cu"
     cuda_source = cuda_path.read_text()
 
-    print(f"[TEST] Porting {cuda_path.name}...")
+    print(f"[TEST] Porting {kernel_name}.cu...")
     hip_source = port_cuda_to_hip(cuda_source)
 
-    # Sanity checks on the output shape
-    assert hip_source, "Agent returned empty output"
-    assert "hip/hip_runtime.h" in hip_source, "Missing HIP runtime include"
-    assert "cudaMalloc" not in hip_source, "Unported cudaMalloc found"
-    assert "cudaMemcpy" not in hip_source, "Unported cudaMemcpy found"
-    assert "cuda_runtime.h" not in hip_source, "Unported cuda_runtime.h found"
-    assert "__global__" in hip_source, "Kernel definition missing"
+    # No markdown fences leaked through
+    assert not hip_source.startswith("```"), (
+        f"{kernel_name}: Markdown fence not stripped"
+    )
 
-    # The output must compile through our mock hipcc
-    result = compile_hip(hip_source, "saxpy")
-    assert result.success, f"Final compile failed: {result.errors}"
+    # Has the HIP runtime include
+    assert "hip/hip_runtime.h" in hip_source, (
+        f"{kernel_name}: Missing HIP runtime include"
+    )
 
-    print(f"[PASS] saxpy port — {len(hip_source)} chars, compiles cleanly")
+    # No CUDA leftovers
+    for symbol in CUDA_LEFTOVERS:
+        assert symbol not in hip_source, (
+            f"{kernel_name}: Unported {symbol} found in output"
+        )
+
+    # Kernel definition preserved
+    assert "__global__" in hip_source, (
+        f"{kernel_name}: Kernel definition missing"
+    )
+
+    # Compiles via mock hipcc
+    result = compile_hip(hip_source, kernel_name)
+    assert result.success, (
+        f"{kernel_name}: Mock compile failed: {result.errors}"
+    )
+
+    print(f"[PASS] {kernel_name} — {len(hip_source)} chars, compiles cleanly")
     return hip_source
 
 
-def test_agent_handles_clean_input():
-    """Sanity check: agent shouldn't crash on already-ported HIP."""
-    hip_path = ROOT / "kernels" / "hip_reference" / "saxpy.hip"
-    hip_source_input = hip_path.read_text()
+def test_saxpy():
+    """Simple 1D kernel — the smoke test."""
+    _check_port("saxpy")
 
-    print(f"[TEST] Feeding agent already-ported {hip_path.name}...")
-    output = port_cuda_to_hip(hip_source_input)
 
-    assert output, "Agent returned empty output on clean input"
-    result = compile_hip(output, "saxpy_clean")
-    assert result.success, f"Clean-input compile failed: {result.errors}"
+def test_vector_dot():
+    """1D kernel with shared memory reduction — exercises atomicAdd."""
+    _check_port("vector_dot")
 
-    print(f"[PASS] Clean input handled — agent produced compiling output")
+
+def test_matmul():
+    """2D kernel with multiple buffers — the realistic case."""
+    _check_port("matmul")
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("ROCMIGRATE AGENT — INTEGRATION TESTS")
+    print("ROCMIGRATE AGENT — INTEGRATION TESTS (3 kernels)")
     print("=" * 60)
+    print()
 
     try:
-        test_saxpy_port()
+        test_saxpy()
         print()
-        test_agent_handles_clean_input()
+        test_vector_dot()
+        print()
+        test_matmul()
         print()
         print("=" * 60)
-        print("ALL TESTS PASSED")
+        print("ALL TESTS PASSED — agent works on all 3 kernels")
         print("=" * 60)
     except AssertionError as e:
         print()
